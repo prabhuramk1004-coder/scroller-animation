@@ -1,24 +1,25 @@
 
-export interface GameState {
-  oxygen: number;
-  health: number;
-  power: number;
-  location: string;
-  inventory: string[];
-  turnCount: number;
-  isGameOver: boolean;
-  history: Array<{
-    role: 'gm' | 'player';
-    content: string;
-    actions?: string[];
-  }>;
+export type Player = 'X' | 'O' | null;
+
+export enum GameMode {
+  PVP = 'PVP',
+  AI = 'AI'
 }
 
-export interface GMResponse {
-  narrative: string;
-  suggestedActions: string[];
-  locationUpdate: string;
-  itemFound?: string;
-  healthDelta?: number;
-  powerDelta?: number;
+export interface GameState {
+  board: Player[];
+  isXNext: boolean;
+  winner: Player | 'Draw';
+  winningLine: number[] | null;
+  history: Player[][];
+  scores: { X: number; O: number };
+  mode: GameMode;
+  isAiThinking: boolean;
+}
+
+export interface ThemeColors {
+  primary: string;
+  secondary: string;
+  accent: string;
+  bg: string;
 }

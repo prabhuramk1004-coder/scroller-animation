@@ -1,274 +1,210 @@
 
-import React, { useState, useEffect, useRef } from 'react';
-import { GameState } from './types';
-import { getGMResponse } from './geminiService';
-import { Activity, Wind, Zap, MapPin, Package, Terminal as TerminalIcon, Send, ShieldAlert } from 'lucide-react';
-
-const INITIAL_STATE: GameState = {
-  oxygen: 100,
-  health: 100,
-  power: 12,
-  location: "Cryo-Chamber",
-  inventory: [],
-  turnCount: 0,
-  isGameOver: false,
-  history: []
-};
+import React, { useState, useEffect, useCallback } from 'react';
+import Square from './components/Square';
+import { GameMode, Player, GameState } from './types';
+import { calculateWinner, THEME } from './constants';
+import { getAiMove } from './services/geminiService';
 
 const App: React.FC = () => {
-  const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
-  const [loading, setLoading] = useState(false);
-  const [customAction, setCustomAction] = useState("");
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [gameState, setGameState] = useState<GameState>({
+    board: Array(9).fill(null),
+    isXNext: true,
+    winner: null,
+    winningLine: null,
+    history: [Array(9).fill(null)],
+    scores: { X: 0, O: 0 },
+    mode: GameMode.PVP,
+    isAiThinking: false
+  });
 
-  useEffect(() => {
-    if (gameState.history.length === 0) {
-      handleAction("Wake up");
-    }
-  }, []);
-
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTo({
-        top: scrollRef.current.scrollHeight,
-        behavior: 'smooth'
-      });
-    }
-  }, [gameState.history, loading]);
-
-  const handleAction = async (action: string) => {
-    if (gameState.isGameOver || loading) return;
-
-    setLoading(true);
-    const updatedHistory = [...gameState.history];
-    if (action !== "Wake up") {
-      updatedHistory.push({ role: 'player', content: action });
-    }
-
-    const oxygenCost = action === "Wake up" ? 0 : 5;
-    const newOxygen = Math.max(0, gameState.oxygen - oxygenCost);
-
-    if (newOxygen <= 0) {
-      setGameState(prev => ({
-        ...prev,
-        oxygen: 0,
-        isGameOver: true,
-        history: [...updatedHistory, { 
-          role: 'gm', 
-          content: "ERROR: CRITICAL OXYGEN FAILURE. BIOSYSTEMS SHUTTING DOWN... You succumb to the vacuum of the Aetheris. The emerald growth pulses one last time over your cooling body. CONNECTION LOST.",
-          actions: ["REBOOT SYSTEM"]
-        }]
-      }));
-      setLoading(false);
-      return;
-    }
-
-    try {
-      const result = await getGMResponse({ ...gameState, history: updatedHistory, oxygen: newOxygen }, action);
-      
-      const newHealth = Math.max(0, gameState.health + (result.healthDelta || 0));
-      const newPower = Math.min(100, Math.max(0, gameState.power + (result.powerDelta || 0)));
-      const newInventory = [...gameState.inventory];
-      if (result.itemFound && !newInventory.includes(result.itemFound)) {
-        newInventory.push(result.itemFound);
-      }
-
-      const gameOver = newHealth <= 0 || result.narrative.toLowerCase().includes("game over");
-
-      setGameState(prev => ({
-        ...prev,
-        oxygen: newOxygen,
-        health: newHealth,
-        power: newPower,
-        location: result.locationUpdate,
-        inventory: newInventory,
-        turnCount: prev.turnCount + 1,
-        isGameOver: gameOver,
-        history: [...updatedHistory, { 
-          role: 'gm', 
-          content: result.narrative,
-          actions: result.suggestedActions 
-        }]
-      }));
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-      setCustomAction("");
-    }
+  const resetGame = () => {
+    setGameState(prev => ({
+      ...prev,
+      board: Array(9).fill(null),
+      isXNext: true,
+      winner: null,
+      winningLine: null,
+      isAiThinking: false
+    }));
   };
 
-  const restartGame = () => {
-    setGameState(INITIAL_STATE);
-    // Use a small timeout to allow state to reset before triggering initial action
-    setTimeout(() => handleAction("Wake up"), 50);
-  };
+  const handleSquareClick = useCallback(async (i: number) => {
+    if (gameState.board[i] || gameState.winner || gameState.isAiThinking) return;
 
-  const StatBox = ({ icon: Icon, label, value, color, max = 100 }: { icon: any, label: string, value: number, color: string, max?: number }) => (
-    <div className="bg-zinc-900/80 border border-white/5 p-3 rounded-md flex flex-col gap-1 min-w-[110px] backdrop-blur-xl relative overflow-hidden group">
-      <div className={`absolute top-0 left-0 h-full w-1 transition-all duration-1000 ${color.replace('text-', 'bg-')}`} style={{ height: `${(value / max) * 100}%` }} />
-      <div className="flex items-center gap-2 text-[10px] font-bold text-zinc-500 uppercase tracking-widest pl-2">
-        <Icon size={12} className={color} />
-        {label}
-      </div>
-      <div className="flex items-baseline gap-1 pl-2">
-        <span className={`text-xl font-bold orbitron ${color} text-glow`}>{value}</span>
-        <span className="text-[10px] text-zinc-600">%</span>
-      </div>
-    </div>
-  );
+    const newBoard = [...gameState.board];
+    newBoard[i] = gameState.isXNext ? 'X' : 'O';
+
+    const { winner, line } = calculateWinner(newBoard);
+
+    setGameState(prev => {
+      const newScores = { ...prev.scores };
+      if (winner === 'X') newScores.X += 1;
+      if (winner === 'O') newScores.O += 1;
+
+      return {
+        ...prev,
+        board: newBoard,
+        isXNext: !prev.isXNext,
+        winner,
+        winningLine: line,
+        scores: newScores
+      };
+    });
+  }, [gameState]);
+
+  // AI Turn Logic
+  useEffect(() => {
+    if (
+      gameState.mode === GameMode.AI && 
+      !gameState.isXNext && 
+      !gameState.winner && 
+      !gameState.isAiThinking
+    ) {
+      const makeAiMove = async () => {
+        setGameState(prev => ({ ...prev, isAiThinking: true }));
+        try {
+          // Add a small delay for "thinking" feel
+          await new Promise(r => setTimeout(r, 800));
+          const move = await getAiMove(gameState.board);
+          handleSquareClick(move);
+        } catch (error) {
+          console.error("AI turn failed", error);
+        } finally {
+          setGameState(prev => ({ ...prev, isAiThinking: false }));
+        }
+      };
+      makeAiMove();
+    }
+  }, [gameState.isXNext, gameState.mode, gameState.winner, gameState.board, handleSquareClick, gameState.isAiThinking]);
+
+  const toggleMode = () => {
+    setGameState(prev => ({
+      ...prev,
+      mode: prev.mode === GameMode.PVP ? GameMode.AI : GameMode.PVP,
+      scores: { X: 0, O: 0 }
+    }));
+    resetGame();
+  };
 
   return (
-    <div className="flex flex-col h-screen max-w-6xl mx-auto px-6 py-8 relative">
-      {/* Background Ambience */}
-      <div className="fixed inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_50%,rgba(16,185,129,0.05),transparent_70%)]"></div>
+    <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-4 selection:bg-indigo-500/30">
+      {/* Header */}
+      <div className="mb-12 text-center">
+        <h1 className="text-5xl font-extrabold tracking-tighter mb-2 bg-gradient-to-r from-indigo-400 via-purple-400 to-rose-400 bg-clip-text text-transparent">
+          CHROMA XO
+        </h1>
+        <p className="text-slate-400 font-medium">Experience color-coded tactical combat</p>
+      </div>
 
-      {/* Top HUD */}
-      <header className="flex flex-col md:flex-row gap-4 mb-8 shrink-0 z-10">
-        <div className="flex-1 flex gap-3">
-          <StatBox icon={Activity} label="Vitals" value={gameState.health} color="text-rose-500" />
-          <StatBox icon={Wind} label="Oxygen" value={gameState.oxygen} color="text-emerald-400" />
-          <StatBox icon={Zap} label="Core" value={gameState.power} color="text-amber-400" />
-        </div>
-        
-        <div className="bg-zinc-900/80 border border-white/5 p-3 rounded-md flex-1 md:flex-none md:w-64 backdrop-blur-xl flex items-center gap-4">
-          <div className="p-2 bg-purple-500/10 rounded border border-purple-500/20">
-            <MapPin size={18} className="text-purple-400" />
-          </div>
-          <div className="overflow-hidden">
-            <div className="text-[10px] text-zinc-500 uppercase tracking-widest font-bold">Deck Registry</div>
-            <div className="text-sm font-bold orbitron text-purple-300 truncate tracking-wider uppercase">
-              {gameState.location}
-            </div>
-          </div>
-        </div>
-      </header>
+      {/* Main Container */}
+      <div className="w-full max-w-md bg-slate-900/30 backdrop-blur-xl border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
+        {/* Decorative Background Glow */}
+        <div className={`absolute -top-24 -left-24 w-48 h-48 rounded-full blur-[100px] transition-colors duration-1000 ${gameState.isXNext ? 'bg-indigo-500/20' : 'bg-rose-500/20'}`} />
+        <div className={`absolute -bottom-24 -right-24 w-48 h-48 rounded-full blur-[100px] transition-colors duration-1000 ${gameState.isXNext ? 'bg-indigo-500/10' : 'bg-rose-500/10'}`} />
 
-      {/* Main Narrative Feed */}
-      <main 
-        ref={scrollRef}
-        className="flex-1 bg-black/40 border border-white/5 rounded-2xl overflow-y-auto p-8 space-y-12 shadow-[0_0_50px_-12px_rgba(0,0,0,0.5)] backdrop-blur-sm relative z-10"
-      >
-        {gameState.history.map((entry, i) => (
-          <div key={i} className={`flex flex-col ${entry.role === 'player' ? 'items-end' : 'items-start'} animate-in fade-in slide-in-from-bottom-4 duration-1000 fill-mode-both`}>
-            {entry.role === 'player' ? (
-              <div className="max-w-[70%] bg-emerald-500/5 border border-emerald-500/20 text-emerald-300/80 px-6 py-3 rounded-full rounded-tr-none text-xs font-bold tracking-[0.2em] uppercase italic flex items-center gap-3">
-                <TerminalIcon size={14} />
-                {entry.content}
-              </div>
-            ) : (
-              <div className="max-w-[90%] space-y-4">
-                <div className="text-zinc-200 leading-relaxed text-lg lg:text-xl font-serif tracking-tight drop-shadow-sm first-letter:text-4xl first-letter:font-bold first-letter:mr-2 first-letter:float-left first-letter:text-emerald-500">
-                  {entry.content}
-                </div>
-              </div>
-            )}
+        {/* Score Board */}
+        <div className="flex justify-between items-center mb-10 px-4">
+          <div className={`flex flex-col items-center transition-transform duration-300 ${gameState.isXNext ? 'scale-110' : 'opacity-40'}`}>
+            <span className={`text-sm font-bold tracking-widest uppercase mb-1 ${THEME.X.color}`}>Player X</span>
+            <span className="text-4xl font-black">{gameState.scores.X}</span>
           </div>
-        ))}
-        
-        {loading && (
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-3 text-emerald-500 animate-pulse font-mono text-xs tracking-widest">
-              <TerminalIcon size={14} className="animate-spin-slow" />
-              UPDATING AETHERIS LOGS...
-            </div>
-            <div className="h-[2px] w-48 bg-emerald-500/20 overflow-hidden rounded-full">
-              <div className="h-full bg-emerald-500 animate-progress-indefinite w-1/2"></div>
-            </div>
-          </div>
-        )}
-      </main>
-
-      {/* Input / Control Area */}
-      <footer className="mt-8 space-y-6 shrink-0 z-10">
-        {!gameState.isGameOver ? (
-          <div className="space-y-6">
-            <div className="flex flex-wrap gap-3">
-              {gameState.history[gameState.history.length - 1]?.actions?.map((action, i) => (
-                <button
-                  key={i}
-                  onClick={() => handleAction(action)}
-                  disabled={loading}
-                  className="bg-zinc-900/50 hover:bg-emerald-500/10 border border-zinc-800 hover:border-emerald-500/50 text-zinc-400 hover:text-emerald-400 px-5 py-2.5 rounded-full transition-all duration-300 text-xs font-bold tracking-widest uppercase active:scale-95 disabled:opacity-30 disabled:pointer-events-none"
-                >
-                  {action}
-                </button>
-              ))}
-            </div>
-
-            <form 
-              onSubmit={(e) => { e.preventDefault(); if(customAction.trim()) handleAction(customAction); }}
-              className="relative"
-            >
-              <div className="absolute left-6 top-1/2 -translate-y-1/2 pointer-events-none">
-                <TerminalIcon size={18} className="text-zinc-600 group-focus-within:text-emerald-500 transition-colors" />
-              </div>
-              <input
-                type="text"
-                value={customAction}
-                onChange={(e) => setCustomAction(e.target.value)}
-                placeholder="INPUT SHIP COMMAND..."
-                disabled={loading}
-                className="w-full bg-zinc-900/40 border border-white/5 rounded-2xl py-5 pl-14 pr-16 text-emerald-400 focus:outline-none focus:border-emerald-500/40 focus:bg-emerald-500/5 transition-all font-mono uppercase tracking-[0.3em] text-xs placeholder:text-zinc-700"
-              />
-              <button 
-                type="submit"
-                disabled={loading || !customAction.trim()}
-                className="absolute right-4 top-1/2 -translate-y-1/2 p-3 text-emerald-500 hover:text-emerald-400 transition-all disabled:opacity-0 hover:scale-110"
-              >
-                <Send size={20} />
-              </button>
-            </form>
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-6 animate-in fade-in zoom-in duration-1000">
-            <div className="flex items-center gap-4 text-rose-500 orbitron tracking-[0.5em] text-2xl font-bold animate-pulse">
-              <ShieldAlert size={32} />
-              CRITICAL SYSTEM FAILURE
-            </div>
-            <button
-              onClick={restartGame}
-              className="w-full max-w-md bg-rose-600 hover:bg-rose-500 text-white font-bold orbitron py-5 rounded-2xl transition-all shadow-[0_0_30px_rgba(225,29,72,0.3)] uppercase tracking-widest active:scale-95"
-            >
-              Initialize Reboot Protocol
-            </button>
-          </div>
-        )}
-
-        {/* Footer Bar */}
-        <div className="pt-6 border-t border-white/5 flex flex-col md:flex-row items-center justify-between gap-4 text-[9px] text-zinc-600 font-mono uppercase tracking-[0.2em]">
-          <div className="flex items-center gap-6">
-            <span>OS: VERCEL-EDGE-AETHERIS-v4</span>
-            <span className="flex items-center gap-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
-              RELAY: ENCRYPTED
+          <div className="h-10 w-px bg-slate-800 mx-4" />
+          <div className={`flex flex-col items-center transition-transform duration-300 ${!gameState.isXNext ? 'scale-110' : 'opacity-40'}`}>
+            <span className={`text-sm font-bold tracking-widest uppercase mb-1 ${THEME.O.color}`}>
+              {gameState.mode === GameMode.AI ? 'Gemini O' : 'Player O'}
             </span>
-          </div>
-          
-          <div className="flex items-center gap-6">
-             <div className="flex items-center gap-2 bg-zinc-900/50 px-3 py-1 rounded-full border border-white/5">
-              <Package size={12} className="text-zinc-400" />
-              <span className="text-zinc-400">MANIFEST:</span>
-              <span className="text-zinc-200">
-                {gameState.inventory.length > 0 ? gameState.inventory.join(' | ') : 'NULL'}
-              </span>
-            </div>
+            <span className="text-4xl font-black">{gameState.scores.O}</span>
           </div>
         </div>
-      </footer>
-      
-      <style>{`
-        @keyframes progress-indefinite {
-          0% { transform: translateX(-100%); }
-          100% { transform: translateX(200%); }
-        }
-        .animate-progress-indefinite {
-          animation: progress-indefinite 1.5s infinite linear;
-        }
-        .animate-spin-slow {
-          animation: spin 3s linear infinite;
-        }
-      `}</style>
+
+        {/* Status Indicator */}
+        <div className="mb-8 text-center h-8 flex items-center justify-center">
+          {gameState.winner ? (
+            <div className="animate-bounce font-bold text-xl flex items-center gap-2">
+              {gameState.winner === 'Draw' ? (
+                <span className="text-slate-300 italic">It's a Stalemate!</span>
+              ) : (
+                <>
+                  <span className={gameState.winner === 'X' ? THEME.X.color : THEME.O.color}>
+                    {gameState.winner}
+                  </span>
+                  <span>VICTORY!</span>
+                </>
+              )}
+            </div>
+          ) : gameState.isAiThinking ? (
+            <div className="flex items-center gap-2 text-rose-400 font-semibold italic animate-pulse">
+              <div className="flex gap-1">
+                <div className="w-1 h-1 bg-rose-400 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                <div className="w-1 h-1 bg-rose-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                <div className="w-1 h-1 bg-rose-400 rounded-full animate-bounce"></div>
+              </div>
+              Gemini is thinking...
+            </div>
+          ) : (
+            <div className={`flex items-center gap-2 font-semibold ${gameState.isXNext ? THEME.X.color : THEME.O.color}`}>
+              <div className={`w-2 h-2 rounded-full animate-ping ${gameState.isXNext ? 'bg-indigo-500' : 'bg-rose-500'}`}></div>
+              {gameState.isXNext ? 'X Turn' : 'O Turn'}
+            </div>
+          )}
+        </div>
+
+        {/* Board */}
+        <div className="grid grid-cols-3 gap-3 sm:gap-4 relative mx-auto w-fit">
+          {gameState.board.map((square, i) => (
+            <Square
+              key={i}
+              value={square}
+              onClick={() => handleSquareClick(i)}
+              isWinningSquare={gameState.winningLine?.includes(i) ?? false}
+              disabled={!!gameState.winner || gameState.isAiThinking}
+            />
+          ))}
+        </div>
+
+        {/* Controls */}
+        <div className="mt-10 flex gap-4">
+          <button
+            onClick={resetGame}
+            className="flex-1 py-4 px-6 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 border border-slate-700 rounded-2xl font-bold transition-all flex items-center justify-center gap-2"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+            Restart
+          </button>
+          <button
+            onClick={toggleMode}
+            className={`flex-1 py-4 px-6 rounded-2xl font-bold transition-all border flex items-center justify-center gap-2 shadow-lg ${
+              gameState.mode === GameMode.AI 
+                ? 'bg-rose-500/20 border-rose-500/50 text-rose-300 hover:bg-rose-500/30' 
+                : 'bg-indigo-500/20 border-indigo-500/50 text-indigo-300 hover:bg-indigo-500/30'
+            }`}
+          >
+            {gameState.mode === GameMode.AI ? (
+              <>
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+                Versus AI
+              </>
+            ) : (
+              <>
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                PVP Local
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Footer / Instructions */}
+      <div className="mt-8 text-slate-500 text-sm font-medium flex gap-6">
+        <span className="flex items-center gap-1">
+          <div className="w-2 h-2 rounded-full bg-indigo-500"></div>
+          Indigo starts
+        </span>
+        <span className="flex items-center gap-1">
+          <div className="w-2 h-2 rounded-full bg-rose-500"></div>
+          Rose blocks
+        </span>
+      </div>
     </div>
   );
 };
